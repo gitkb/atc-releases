@@ -1,0 +1,324 @@
+name: Mirror Release
+
+# gitkb/atc (private) dispatches `child-release-created` after its release is
+# published. This workflow re-publishes the identical assets here so installs
+# need no GitHub token, then updates the Homebrew tap and announces the
+# release. Run it by hand to backfill a tag (announce defaults to off).
+
+on:
+  repository_dispatch:
+    types: [child-release-created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "gitkb/atc release tag to mirror (e.g. v0.1.18)"
+        required: true
+      announce:
+        description: "Post the release to Discord"
+        type: boolean
+        default: false
+
+concurrency:
+  # One mirror per tag at a time; a re-dispatch waits instead of racing.
+  group: mirror-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  SOURCE_REPO: gitkb/atc
+  # The private release publishes exactly these files; mirror all of them.
+  ASSETS: >-
+    atc-darwin-arm64.tar.gz
+    atc-darwin-arm64.tar.gz.sha256
+    atc-darwin-x64.tar.gz
+    atc-darwin-x64.tar.gz.sha256
+    atc-linux-arm64.tar.gz
+    atc-linux-arm64.tar.gz.sha256
+    atc-linux-x64.tar.gz
+    atc-linux-x64.tar.gz.sha256
+
+jobs:
+  mirror-release:
+    name: Mirror Release Assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.info.outputs.tag }}
+      version: ${{ steps.info.outputs.version }}
+      prerelease: ${{ steps.info.outputs.prerelease }}
+      announce: ${{ steps.info.outputs.announce }}
+    steps:
+      - name: Extract release info
+        id: info
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          DISPATCH_ANNOUNCE: ${{ github.event.client_payload.announce }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_ANNOUNCE: ${{ inputs.announce }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "repository_dispatch" ]; then
+            TAG="$DISPATCH_TAG"
+            # Dispatched releases announce unless the sender opts out.
+            ANNOUNCE=$([ "$DISPATCH_ANNOUNCE" = "false" ] && echo false || echo true)
+          else
+            TAG="$INPUT_TAG"
+            ANNOUNCE=$([ "$INPUT_ANNOUNCE" = "true" ] && echo true || echo false)
+          fi
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::Unsupported release tag '$TAG'; expected vMAJOR.MINOR.PATCH with an optional prerelease suffix"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          PRERELEASE=$([[ "$VERSION" == *-* ]] && echo true || echo false)
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "announce=$ANNOUNCE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download assets from private release
+        env:
+          GH_TOKEN: ${{ secrets.PARENT_REPO_PAT }}
+          TAG: ${{ steps.info.outputs.tag }}
+        run: |
+          mkdir -p release
+          gh release download "$TAG" \
+            --repo "$SOURCE_REPO" \
+            --pattern "atc-*.tar.gz" \
+            --pattern "atc-*.tar.gz.sha256" \
+            --dir release
+
+      - name: Verify inventory and checksums
+        working-directory: release
+        run: |
+          set -euo pipefail
+          read -r -a assets <<<"$ASSETS"
+          diff -u <(printf '%s\n' "${assets[@]}" | LC_ALL=C sort) \
+                  <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) || {
+            echo "::error::Downloaded assets do not match the expected eight files"
+            exit 1
+          }
+          sha256sum -c ./*.sha256
+
+      - name: Create public release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.info.outputs.tag }}
+          name: ${{ steps.info.outputs.tag }}
+          prerelease: ${{ steps.info.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.info.outputs.prerelease == 'true' && 'false' || 'true' }}
+          body: |
+            ATC ${{ steps.info.outputs.tag }}
+
+            Install via:
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh | bash
+            ```
+
+            Or via Homebrew:
+            ```bash
+            brew install gitkb/tap/atc
+            ```
+          files: release/*
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          # The action otherwise starts every large asset upload concurrently.
+          preserve_order: true
+
+      - name: Verify published assets match the private release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.info.outputs.tag }}
+        run: |
+          set -euo pipefail
+          read -r -a assets <<<"$ASSETS"
+          release_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+          diff -u <(printf '%s\n' "${assets[@]}" | LC_ALL=C sort) \
+                  <(jq -r '.assets[].name' <<<"$release_json" | LC_ALL=C sort) || {
+            echo "::error::Published asset inventory does not match the expected eight files"
+            exit 1
+          }
+          for asset in "${assets[@]}"; do
+            local_digest="sha256:$(sha256sum "release/$asset" | awk '{print $1}')"
+            remote_digest=$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")
+            if [ "$remote_digest" != "$local_digest" ]; then
+              echo "::error::Published digest mismatch for $asset: expected $local_digest, got $remote_digest"
+              exit 1
+            fi
+          done
+          echo "All eight public assets are byte-identical to ${SOURCE_REPO} ${TAG}."
+
+  notify-discord:
+    name: Notify Discord
+    needs: mirror-release
+    if: needs.mirror-release.outputs.announce == 'true'
+    runs-on: ubuntu-latest
+    # A failed Discord post must not block the Homebrew update.
+    continue-on-error: true
+    steps:
+      - name: Check webhook configured
+        id: check
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_RELEASES_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Discord webhook not configured, skipping notification"
+          fi
+
+      - name: Post to Discord
+        if: steps.check.outputs.skip != 'true'
+        env:
+          TAG: ${{ needs.mirror-release.outputs.tag }}
+          WEBHOOK_URL: ${{ secrets.DISCORD_RELEASES_WEBHOOK_URL }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "ATC $TAG Released" \
+            --arg desc "A new version of ATC, the headless agent orchestrator, is available." \
+            --arg install_sh 'curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh | bash' \
+            --arg install_brew 'brew install gitkb/tap/atc' \
+            --arg url "https://github.com/gitkb/atc-releases/releases/tag/$TAG" \
+            '{
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 3066993,
+                fields: [
+                  {
+                    name: "Install via Shell",
+                    value: ("```sh\n" + $install_sh + "\n```")
+                  },
+                  {
+                    name: "Install via Homebrew",
+                    value: ("```sh\n" + $install_brew + "\n```")
+                  }
+                ]
+              }]
+            }')
+
+          # Bounded request with retries; curl failures before an HTTP
+          # response are reported separately from HTTP-level failures.
+          set +e
+          HTTP_STATUS=$(curl -sS -o /tmp/discord_response.txt -w "%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK_URL")
+          CURL_EXIT=$?
+          set -e
+
+          if [ "$CURL_EXIT" -ne 0 ]; then
+            echo "::warning::Discord notification request failed before HTTP response (curl exit $CURL_EXIT)"
+            cat /tmp/discord_response.txt 2>/dev/null || true
+            exit 1
+          elif [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "Discord notification sent successfully (HTTP $HTTP_STATUS)"
+          else
+            echo "::warning::Discord notification failed (HTTP $HTTP_STATUS)"
+            cat /tmp/discord_response.txt
+            exit 1
+          fi
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: mirror-release
+    # Only update on non-prerelease tags
+    if: needs.mirror-release.outputs.prerelease != 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Fetch formula template and checksums from the release tag
+        env:
+          GH_TOKEN: ${{ secrets.PARENT_REPO_PAT }}
+          TAG: ${{ needs.mirror-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # The template lives with the ATC source so it tracks the archive
+          # layout; read it at the released tag, never at a moving branch.
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/${SOURCE_REPO}/contents/homebrew/atc.rb?ref=${TAG}" > atc.rb.template
+          mkdir -p checksums
+          gh release download "$TAG" \
+            --repo "$SOURCE_REPO" \
+            --pattern "*.sha256" \
+            --dir checksums
+
+      - name: Generate Homebrew formula
+        env:
+          VERSION: ${{ needs.mirror-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          sum() { awk '{print $1}' "checksums/atc-$1.tar.gz.sha256"; }
+          # Strip the reference-template comment header, fill placeholders,
+          # and point every download (and the homepage) at this public repo,
+          # whatever the template at an older tag says.
+          sed -e '/^# /d' \
+              -e "s/VERSION_PLACEHOLDER/${VERSION}/g" \
+              -e "s/DARWIN_ARM64_PLACEHOLDER/$(sum darwin-arm64)/" \
+              -e "s/DARWIN_X64_PLACEHOLDER/$(sum darwin-x64)/" \
+              -e "s/LINUX_ARM64_PLACEHOLDER/$(sum linux-arm64)/" \
+              -e "s/LINUX_X64_PLACEHOLDER/$(sum linux-x64)/" \
+              -e "s#https://github.com/gitkb/atc/#https://github.com/gitkb/atc-releases/#g" \
+              -e "s#homepage \"https://github.com/gitkb/atc\"#homepage \"https://github.com/gitkb/atc-releases\"#" \
+              atc.rb.template > atc.rb
+          if grep -nE 'PLACEHOLDER|github\.com/gitkb/atc[/"]' atc.rb; then
+            echo "::error::Generated formula still has a placeholder or a private gitkb/atc URL"
+            exit 1
+          fi
+          cat atc.rb
+
+      - name: Push to Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.mirror-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          BRANCH="atc-v${VERSION}"
+
+          gh auth setup-git
+          gh repo clone gitkb/homebrew-tap tap
+          cp atc.rb tap/Formula/atc.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/atc.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged, skipping commit"
+            exit 0
+          fi
+          # Always branch from the tap's main; force push replaces a branch
+          # left by an earlier failed run.
+          git checkout -B "$BRANCH"
+          git commit -m "atc ${VERSION}"
+          git push -f -u origin "$BRANCH"
+          if ! gh pr view "$BRANCH" --repo gitkb/homebrew-tap >/dev/null 2>&1; then
+            gh pr create \
+              --title "atc ${VERSION}" \
+              --body "Automated formula update from gitkb/atc-releases v${VERSION}." \
+              --base main \
+              --head "$BRANCH" \
+              --repo gitkb/homebrew-tap
+          fi
+
+          # The tap runs a formula-test check on Formula/*.rb changes, so the
+          # PR is usually not mergeable yet: queue it with --auto. GitHub
+          # rejects --auto on an already-mergeable PR ("clean status"); merge
+          # directly then.
+          if merge_output=$(gh pr merge "$BRANCH" --repo gitkb/homebrew-tap --auto --squash 2>&1); then
+            echo "$merge_output"
+          elif echo "$merge_output" | grep -qi 'clean status'; then
+            echo "$merge_output"
+            gh pr merge "$BRANCH" --repo gitkb/homebrew-tap --squash
+          else
+            echo "$merge_output"
+            echo "::error::Failed to merge the atc ${VERSION} formula PR"
+            exit 1
+          fi
