@@ -299,26 +299,45 @@ jobs:
           git checkout -B "$BRANCH"
           git commit -m "atc ${VERSION}"
           git push -f -u origin "$BRANCH"
-          if ! gh pr view "$BRANCH" --repo gitkb/homebrew-tap >/dev/null 2>&1; then
-            gh pr create \
+
+          # Only an OPEN PR counts: an earlier release of the same version may
+          # have merged from this branch name, and `gh pr view <branch>` would
+          # find that merged PR and skip creating the new one.
+          pr=$(gh pr list --repo gitkb/homebrew-tap --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create \
               --title "atc ${VERSION}" \
               --body "Automated formula update from gitkb/atc-releases v${VERSION}." \
               --base main \
               --head "$BRANCH" \
-              --repo gitkb/homebrew-tap
+              --repo gitkb/homebrew-tap)
           fi
+          echo "Formula PR: $pr"
 
           # The tap runs a formula-test check on Formula/*.rb changes, so the
           # PR is usually not mergeable yet: queue it with --auto. GitHub
           # rejects --auto on an already-mergeable PR ("clean status"); merge
           # directly then.
-          if merge_output=$(gh pr merge "$BRANCH" --repo gitkb/homebrew-tap --auto --squash 2>&1); then
+          if merge_output=$(gh pr merge "$pr" --auto --squash 2>&1); then
             echo "$merge_output"
           elif echo "$merge_output" | grep -qi 'clean status'; then
             echo "$merge_output"
-            gh pr merge "$BRANCH" --repo gitkb/homebrew-tap --squash
+            gh pr merge "$pr" --squash
           else
             echo "$merge_output"
             echo "::error::Failed to merge the atc ${VERSION} formula PR"
             exit 1
           fi
+
+          # A queued merge is not a merge. Succeed only once the tap's main
+          # serves this exact formula (the formula test takes a few minutes).
+          for _ in $(seq 1 40); do
+            if gh api -H "Accept: application/vnd.github.raw" \
+                 "repos/gitkb/homebrew-tap/contents/Formula/atc.rb?ref=main" | cmp -s - Formula/atc.rb; then
+              echo "gitkb/homebrew-tap main now serves atc ${VERSION} from gitkb/atc-releases."
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::$pr did not land on the tap's main within 20 minutes"
+          exit 1
