@@ -252,8 +252,10 @@ install_atc() {
             echo ""
             echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
             echo ""
-            # Debian and Ubuntu's ~/.profile adds ~/.local/bin once it exists.
-            if [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && grep -qs '\.local/bin' "$HOME/.profile"; then
+            # Debian and Ubuntu's ~/.profile adds "$HOME/bin" and
+            # "$HOME/.local/bin" at login once they exist.
+            local rel="${INSTALL_DIR#"$HOME"/}"
+            if [ "$rel" != "$INSTALL_DIR" ] && grep -qsF "\"\$HOME/$rel\"" "$HOME/.profile"; then
                 echo "Your ~/.profile adds it to PATH from your next login on; nothing else is needed."
             else
                 echo "To keep it, add that line to your shell's startup file (~/.bashrc, ~/.zshrc),"
