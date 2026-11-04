@@ -6,9 +6,9 @@ on:
     workflows: ["Mirror Release"]
     types: [completed]
 
-  # Test PRs that touch the installer
+  # Test PRs that touch the installer or its tests
   pull_request:
-    paths: [install.sh]
+    paths: [install.sh, test/**, .github/workflows/test-install.yml]
 
   # Manual trigger with optional version override
   workflow_dispatch:
@@ -67,7 +67,7 @@ jobs:
         run: |
           docker run --rm \
             -e VERSION="${INPUT_VERSION:-latest}" \
-            -v "${{ github.workspace }}/install.sh:/install.sh:ro" \
+            -v "${{ github.workspace }}:/src:ro" \
             ${{ matrix.distro }} \
             bash -c '
               set -euo pipefail
@@ -75,25 +75,14 @@ jobs:
               # --- Dependencies ------------------------------------------------
               apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
 
-              # --- Run installer -----------------------------------------------
-              bash /install.sh 2>/tmp/install_stderr.log
-
-              # --- Assertions ---------------------------------------------------
-              for binary in atc atc-productionize; do
-                test -x "$HOME/.local/bin/$binary" || { echo "FAIL: $binary not installed"; exit 1; }
-              done
-              "$HOME/.local/bin/atc" --version     # proves correct arch + no missing libs
-
-              # No unbound variable errors or other stderr noise.
-              # Filter known-harmless tar warnings about unknown xattr headers
-              # (tarballs packaged on macOS carry LIBARCHIVE.xattr.* headers;
-              # GNU tar warns but extracts cleanly).
-              if grep -v "^tar: Ignoring unknown extended header keyword" \
-                   /tmp/install_stderr.log | grep -q .; then
-                echo "FAIL: install.sh produced unexpected stderr output:"
-                cat /tmp/install_stderr.log
-                exit 1
-              fi
+              # --- Run installer as a normal user, as a new user would ---------
+              # Then: every archive binary installed and runs (correct arch, no
+              # missing libs); stderr is clean and the PATH hint works.
+              useradd -m tester
+              su tester -s /bin/bash -c "cd \
+                && { bash /src/install.sh >out.log 2>err.log || { cat out.log err.log; exit 1; }; } \
+                && bash /src/test/verify-install.sh \
+                && bash /src/test/check-install-output.sh out.log err.log"
             '
 
   # ---------------------------------------------------------------------------
@@ -121,33 +110,76 @@ jobs:
       - name: Run install.sh
         env:
           VERSION: ${{ github.event.inputs.version || 'latest' }}
-        run: bash install.sh 2>/tmp/install_stderr.log
+        run: bash install.sh >/tmp/install_stdout.log 2>/tmp/install_stderr.log
 
       - name: Verify installation
         run: |
-          for binary in atc atc-productionize; do
-            test -x "$HOME/.local/bin/$binary" || { echo "FAIL: $binary not installed"; exit 1; }
-          done
-          "$HOME/.local/bin/atc" --version
+          bash test/verify-install.sh
+          bash test/check-install-output.sh /tmp/install_stdout.log /tmp/install_stderr.log
 
           # The signed hotkey app lands where atc looks for it, signature intact.
           app="$HOME/.local/libexec/ATC Hotkey.app"
           test -d "$app" || { echo "FAIL: ATC Hotkey.app not installed"; exit 1; }
           codesign --verify --deep --strict "$app"
 
-          if grep -v "^tar: Ignoring unknown extended header keyword" \
-               /tmp/install_stderr.log | grep -q .; then
-            echo "FAIL: install.sh produced unexpected stderr output:"
-            cat /tmp/install_stderr.log
-            exit 1
-          fi
+  # ---------------------------------------------------------------------------
+  # Refusals — systems outside the support contract get one error line before
+  # anything is downloaded. Windows shells are faked with a `uname` stub.
+  # ---------------------------------------------------------------------------
+  test-refusal:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    name: refusal / linux
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # bash:5.2 is Alpine with bash but no curl: the musl line must come
+      # before "curl is required".
+      - name: musl (Alpine)
+        run: docker run --rm -v "${{ github.workspace }}:/src:ro" bash:5.2 bash /src/test/check-refusal.sh musl
+
+      - name: INSTALL_DIR the user can't write
+        run: >-
+          docker run --rm --user ubuntu -v "${{ github.workspace }}:/src:ro" ubuntu:24.04
+          env INSTALL_DIR=/usr/local/bin bash /src/test/check-refusal.sh 'Pick a directory you own'
+
+      - name: glibc older than 2.28 (Ubuntu 18.04)
+        run: docker run --rm -v "${{ github.workspace }}:/src:ro" ubuntu:18.04 bash /src/test/check-refusal.sh 'glibc 2.27'
+
+      - name: Git Bash, MSYS2, Cygwin
+        run: |
+          for uname in MINGW64_NT-10.0-26100 MSYS_NT-10.0-26100 CYGWIN_NT-10.0-26100; do
+            bash test/check-refusal.sh WSL2 "$uname"
+          done
+
+  # Native Git Bash on Windows, run by hand (Windows is not in the contract).
+  test-refusal-windows:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    name: refusal / windows git bash
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Git Bash refuses with the WSL2 line
+        run: |
+          uname -s
+          bash test/check-refusal.sh WSL2
 
   # ---------------------------------------------------------------------------
   # Summary — single required check for branch protection
   # ---------------------------------------------------------------------------
   results:
     if: always()
-    needs: [test-linux, test-macos]
+    needs: [test-linux, test-macos, test-refusal]
     runs-on: ubuntu-latest
     name: results
     steps:
@@ -155,15 +187,17 @@ jobs:
         env:
           LINUX: ${{ needs.test-linux.result }}
           MACOS: ${{ needs.test-macos.result }}
+          REFUSAL: ${{ needs.test-refusal.result }}
         run: |
-          echo "linux:  $LINUX"
-          echo "macos:  $MACOS"
-          if [[ "$LINUX" == "skipped" && "$MACOS" == "skipped" ]]; then
+          echo "linux:   $LINUX"
+          echo "macos:   $MACOS"
+          echo "refusal: $REFUSAL"
+          if [[ "$LINUX" == "skipped" && "$MACOS" == "skipped" && "$REFUSAL" == "skipped" ]]; then
             echo "Tests skipped (upstream workflow did not succeed)."
             exit 0
           fi
           # Treat skipped as acceptable when paired with success
-          if [[ "$LINUX" =~ ^(success|skipped)$ && "$MACOS" =~ ^(success|skipped)$ ]]; then
+          if [[ "$LINUX" =~ ^(success|skipped)$ && "$MACOS" =~ ^(success|skipped)$ && "$REFUSAL" =~ ^(success|skipped)$ ]]; then
             echo "All install tests passed."
           else
             echo "One or more install tests failed."
