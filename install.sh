@@ -189,14 +189,14 @@ install_atc() {
     # Create install directory if needed
     mkdir -p "$INSTALL_DIR"
 
-    # Install every executable at the archive's top level, so the list follows
-    # atc's release. The `*` glob skips dotfiles such as the `._*` AppleDouble
+    # Install every file at the archive's top level, so the list follows atc's
+    # release. The `*` glob skips dotfiles such as the `._*` AppleDouble
     # entries of archives packed on macOS. The sidecars must sit beside atc:
     # atc resolves them from its own directory without configuration.
     info "Installing to ${INSTALL_DIR}..."
     local path
     for path in "${tmp_dir}/archive"/*; do
-        if [ -f "$path" ] && [ -x "$path" ]; then
+        if [ -f "$path" ]; then
             cp "$path" "$INSTALL_DIR/"
             chmod +x "$INSTALL_DIR/${path##*/}"
             info "Installed ${path##*/}"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Asserts that install.sh installed exactly the binaries at the top level of
+# Asserts that install.sh installed exactly the files at the top level of
 # the release archive, and that each one runs. The expected list comes from
 # the archive's own listing, so it follows atc's release.
 set -euo pipefail
