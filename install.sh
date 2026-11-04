@@ -3,12 +3,12 @@ set -eu
 
 # ATC (Agent Traffic Control) Installation Script
 # Usage: curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh | bash
-#   or:  VERSION=0.1.18 curl -fsSL ... | bash
-#   or:  INSTALL_DIR=/usr/local/bin curl -fsSL ... | bash
+#   or:  curl -fsSL ... | VERSION=0.1.18 bash
+#   or:  curl -fsSL ... | INSTALL_DIR=/usr/local/bin bash
 #
-# Installs `atc` and its `atc-productionize` sidecar into INSTALL_DIR. On macOS
-# the signed "ATC Hotkey.app" goes to <prefix>/libexec (the parent of
-# INSTALL_DIR), where `atc` looks for it.
+# Installs every binary in the release archive (`atc` and its worker sidecars)
+# into INSTALL_DIR. On macOS the signed "ATC Hotkey.app" goes to
+# <prefix>/libexec (the parent of INSTALL_DIR), where `atc` looks for it.
 
 REPO="gitkb/atc-releases"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -37,9 +37,33 @@ warn() {
     printf '%b\n' "${YELLOW}[WARN]${NC} $1"
 }
 
+# To stderr: errors raised inside $(...) would otherwise be captured silently.
 error() {
-    printf '%b\n' "${RED}[ERROR]${NC} $1"
+    printf '%b\n' "${RED}[ERROR]${NC} $1" >&2
     exit 1
+}
+
+# The Linux binaries link glibc 2.28+. Refuse musl and older glibc before
+# downloading; an unrecognised libc is left to the post-install check.
+check_libc() {
+    local first version major minor
+    first=$(ldd --version 2>&1 | head -n 1) || true
+    case "$first" in
+        *musl*) error "atc needs glibc 2.28+; this system uses musl (e.g. Alpine). Use a glibc distribution such as Debian or Ubuntu." ;;
+        *GLIBC*|*"GNU libc"*) ;;
+        *) return 0 ;;
+    esac
+    version="${first##* }"
+    case "$version" in
+        [0-9]*.[0-9]*) ;;
+        *) return 0 ;;
+    esac
+    major="${version%%.*}"
+    minor="${version#*.}"
+    minor="${minor%%[!0-9]*}"
+    if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 28 ]; }; then
+        error "atc needs glibc 2.28+; this system has glibc ${version}."
+    fi
 }
 
 # Detect platform
@@ -51,7 +75,8 @@ detect_platform() {
 
     case "$os" in
         darwin) os="darwin" ;;
-        linux) os="linux" ;;
+        linux) check_libc; os="linux" ;;
+        mingw*|msys*|cygwin*) error "atc supports macOS and glibc Linux; on Windows, run this installer inside WSL2." ;;
         *) error "Unsupported operating system: $os" ;;
     esac
 
@@ -157,20 +182,24 @@ install_atc() {
     mkdir -p "${tmp_dir}/archive"
     tar -xzf "${tmp_dir}/atc.tar.gz" -C "${tmp_dir}/archive"
 
+    if [ ! -f "${tmp_dir}/archive/atc" ]; then
+        error "Binary atc not found in archive"
+    fi
+
     # Create install directory if needed
     mkdir -p "$INSTALL_DIR"
 
-    # Install binaries. The sidecar must sit beside atc: atc resolves it from
-    # its own directory without configuration.
+    # Install every executable at the archive's top level, so the list follows
+    # atc's release. The `*` glob skips dotfiles such as the `._*` AppleDouble
+    # entries of archives packed on macOS. The sidecars must sit beside atc:
+    # atc resolves them from its own directory without configuration.
     info "Installing to ${INSTALL_DIR}..."
-    local binary
-    for binary in atc atc-productionize; do
-        if [ -f "${tmp_dir}/archive/${binary}" ]; then
-            cp "${tmp_dir}/archive/${binary}" "$INSTALL_DIR/"
-            chmod +x "$INSTALL_DIR/${binary}"
-            info "Installed ${binary}"
-        else
-            error "Binary ${binary} not found in archive"
+    local path
+    for path in "${tmp_dir}/archive"/*; do
+        if [ -f "$path" ] && [ -x "$path" ]; then
+            cp "$path" "$INSTALL_DIR/"
+            chmod +x "$INSTALL_DIR/${path##*/}"
+            info "Installed ${path##*/}"
         fi
     done
 
