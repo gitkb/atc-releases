@@ -76,11 +76,11 @@ jobs:
               apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
 
               # --- Run installer as a normal user, as a new user would ---------
-              useradd -m tester
               # Then: every archive binary installed and runs (correct arch, no
               # missing libs); stderr is clean and the PATH hint works.
               useradd -m tester
-              su tester -s /bin/bash -c "cd && bash /src/install.sh >out.log 2>err.log \
+              su tester -s /bin/bash -c "cd \
+                && { bash /src/install.sh >out.log 2>err.log || { cat out.log err.log; exit 1; }; } \
                 && bash /src/test/verify-install.sh \
                 && bash /src/test/check-install-output.sh out.log err.log"
             '
