@@ -66,6 +66,17 @@ check_libc() {
     fi
 }
 
+# Refuse an INSTALL_DIR this user can't write before downloading anything.
+check_install_dir() {
+    local dir="$INSTALL_DIR"
+    while [ ! -e "$dir" ]; do
+        dir=$(dirname "$dir")
+    done
+    if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+        error "Cannot write to ${INSTALL_DIR}. Pick a directory you own (e.g. INSTALL_DIR=\"\$HOME/bin\") or run the installer with sudo."
+    fi
+}
+
 # Detect platform
 detect_platform() {
     local os
@@ -123,8 +134,7 @@ get_latest_version() {
 
 # Download and install
 install_atc() {
-    local platform
-    platform=$(detect_platform)
+    local platform="$1"
     local version="$VERSION"
     version="${version#v}"  # Strip leading v if user passed VERSION=v0.1.18
 
@@ -180,7 +190,13 @@ install_atc() {
 
     info "Extracting..."
     mkdir -p "${tmp_dir}/archive"
-    tar -xzf "${tmp_dir}/atc.tar.gz" -C "${tmp_dir}/archive"
+    # Archives packed on macOS carry LIBARCHIVE.xattr.* headers that GNU tar
+    # warns about; the files extract the same either way.
+    if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+        tar --warning=no-unknown-keyword -xzf "${tmp_dir}/atc.tar.gz" -C "${tmp_dir}/archive"
+    else
+        tar -xzf "${tmp_dir}/atc.tar.gz" -C "${tmp_dir}/archive"
+    fi
 
     if [ ! -f "${tmp_dir}/archive/atc" ]; then
         error "Binary atc not found in archive"
@@ -230,18 +246,19 @@ install_atc() {
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
         *)
-            warn "$INSTALL_DIR is not in your PATH"
+            warn "$INSTALL_DIR is not in this shell's PATH"
             echo ""
-            echo "Add it to your shell configuration:"
+            echo "To use atc in this terminal now, run:"
             echo ""
-            echo "  # For bash (~/.bashrc or ~/.bash_profile):"
-            echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
+            echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
             echo ""
-            echo "  # For zsh (~/.zshrc):"
-            echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
-            echo ""
-            echo "  # For fish (~/.config/fish/config.fish):"
-            echo "  fish_add_path $INSTALL_DIR"
+            # Debian and Ubuntu's ~/.profile adds ~/.local/bin once it exists.
+            if [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && grep -qs '\.local/bin' "$HOME/.profile"; then
+                echo "Your ~/.profile adds it to PATH from your next login on; nothing else is needed."
+            else
+                echo "To keep it, add that line to your shell's startup file (~/.bashrc, ~/.zshrc),"
+                echo "or for fish run: fish_add_path $INSTALL_DIR"
+            fi
             echo ""
             ;;
     esac
@@ -257,6 +274,11 @@ main() {
     echo "============="
     echo ""
 
+    # Refusals that installing curl or tar wouldn't fix come first.
+    local platform
+    platform=$(detect_platform)
+    check_install_dir
+
     # Check for curl
     if ! command -v curl >/dev/null 2>&1; then
         error "curl is required but not installed"
@@ -267,7 +289,7 @@ main() {
         error "tar is required but not installed"
     fi
 
-    install_atc
+    install_atc "$platform"
 }
 
 main "$@"

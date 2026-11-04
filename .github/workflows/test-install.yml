@@ -75,23 +75,14 @@ jobs:
               # --- Dependencies ------------------------------------------------
               apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
 
-              # --- Run installer -----------------------------------------------
-              bash /src/install.sh 2>/tmp/install_stderr.log
-
-              # --- Assertions ---------------------------------------------------
-              # Every archive binary installed and runs (correct arch, no missing libs).
-              bash /src/test/verify-install.sh
-
-              # No unbound variable errors or other stderr noise.
-              # Filter known-harmless tar warnings about unknown xattr headers
-              # (tarballs packaged on macOS carry LIBARCHIVE.xattr.* headers;
-              # GNU tar warns but extracts cleanly).
-              if grep -v "^tar: Ignoring unknown extended header keyword" \
-                   /tmp/install_stderr.log | grep -q .; then
-                echo "FAIL: install.sh produced unexpected stderr output:"
-                cat /tmp/install_stderr.log
-                exit 1
-              fi
+              # --- Run installer as a normal user, as a new user would ---------
+              useradd -m tester
+              # Then: every archive binary installed and runs (correct arch, no
+              # missing libs); stderr is clean and the PATH hint works.
+              useradd -m tester
+              su tester -s /bin/bash -c "cd && bash /src/install.sh >out.log 2>err.log \
+                && bash /src/test/verify-install.sh \
+                && bash /src/test/check-install-output.sh out.log err.log"
             '
 
   # ---------------------------------------------------------------------------
@@ -119,23 +110,17 @@ jobs:
       - name: Run install.sh
         env:
           VERSION: ${{ github.event.inputs.version || 'latest' }}
-        run: bash install.sh 2>/tmp/install_stderr.log
+        run: bash install.sh >/tmp/install_stdout.log 2>/tmp/install_stderr.log
 
       - name: Verify installation
         run: |
           bash test/verify-install.sh
+          bash test/check-install-output.sh /tmp/install_stdout.log /tmp/install_stderr.log
 
           # The signed hotkey app lands where atc looks for it, signature intact.
           app="$HOME/.local/libexec/ATC Hotkey.app"
           test -d "$app" || { echo "FAIL: ATC Hotkey.app not installed"; exit 1; }
           codesign --verify --deep --strict "$app"
-
-          if grep -v "^tar: Ignoring unknown extended header keyword" \
-               /tmp/install_stderr.log | grep -q .; then
-            echo "FAIL: install.sh produced unexpected stderr output:"
-            cat /tmp/install_stderr.log
-            exit 1
-          fi
 
   # ---------------------------------------------------------------------------
   # Refusals — systems outside the support contract get one error line before
@@ -152,8 +137,15 @@ jobs:
         with:
           persist-credentials: false
 
+      # bash:5.2 is Alpine with bash but no curl: the musl line must come
+      # before "curl is required".
       - name: musl (Alpine)
         run: docker run --rm -v "${{ github.workspace }}:/src:ro" bash:5.2 bash /src/test/check-refusal.sh musl
+
+      - name: INSTALL_DIR the user can't write
+        run: >-
+          docker run --rm --user ubuntu -v "${{ github.workspace }}:/src:ro" ubuntu:24.04
+          env INSTALL_DIR=/usr/local/bin bash /src/test/check-refusal.sh 'Pick a directory you own'
 
       - name: glibc older than 2.28 (Ubuntu 18.04)
         run: docker run --rm -v "${{ github.workspace }}:/src:ro" ubuntu:18.04 bash /src/test/check-refusal.sh 'glibc 2.27'

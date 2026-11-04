@@ -17,7 +17,7 @@ This repository publishes ATC release assets and the install script. No GitHub a
 | Homebrew | `brew install gitkb/tap/atc` |
 | Install script | `curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh \| bash` |
 | Specific version | `curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh \| VERSION=x.y.z bash` |
-| Custom directory | `curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh \| INSTALL_DIR=/usr/local/bin bash` |
+| Custom directory | `curl -fsSL https://raw.githubusercontent.com/gitkb/atc-releases/main/install.sh \| INSTALL_DIR="$HOME/bin" bash` |
 
 The install script puts `atc` and every worker sidecar in its release archive (such as `atc-productionize`) in `~/.local/bin`. On macOS, it also places the signed `ATC Hotkey.app` in `~/.local/libexec`, where `atc` finds it.
 
