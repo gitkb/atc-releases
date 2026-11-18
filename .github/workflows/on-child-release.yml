@@ -79,9 +79,20 @@ jobs:
             echo "announce=$ANNOUNCE"
           } >> "$GITHUB_OUTPUT"
 
+      # gitkb/atc is private: the dependency-updates App's token, contents read on it alone.
+      - name: Token to read gitkb/atc
+        id: atc-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEPENDENCY_UPDATES_APP_ID }}
+          private-key: ${{ secrets.DEPENDENCY_UPDATES_APP_KEY }}
+          owner: gitkb
+          repositories: atc
+          permission-contents: read
+
       - name: Download assets from private release
         env:
-          GH_TOKEN: ${{ secrets.PARENT_REPO_PAT }}
+          GH_TOKEN: ${{ steps.atc-token.outputs.token }}
           TAG: ${{ steps.info.outputs.tag }}
         run: |
           mkdir -p release
@@ -235,9 +246,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
+      # gitkb/atc is private: the dependency-updates App's token, contents read on it alone.
+      - name: Token to read gitkb/atc
+        id: atc-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEPENDENCY_UPDATES_APP_ID }}
+          private-key: ${{ secrets.DEPENDENCY_UPDATES_APP_KEY }}
+          owner: gitkb
+          repositories: atc
+          permission-contents: read
+
       - name: Fetch formula template and checksums from the release tag
         env:
-          GH_TOKEN: ${{ secrets.PARENT_REPO_PAT }}
+          GH_TOKEN: ${{ steps.atc-token.outputs.token }}
           TAG: ${{ needs.mirror-release.outputs.tag }}
         run: |
           set -euo pipefail
