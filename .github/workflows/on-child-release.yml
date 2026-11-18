@@ -297,9 +297,21 @@ jobs:
           fi
           cat atc.rb
 
+      # Pushes the formula branch, opens and merges its PR on gitkb/homebrew-tap alone.
+      - name: Token to update gitkb/homebrew-tap
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEPENDENCY_UPDATES_APP_ID }}
+          private-key: ${{ secrets.DEPENDENCY_UPDATES_APP_KEY }}
+          owner: gitkb
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Push to Homebrew tap
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
           VERSION: ${{ needs.mirror-release.outputs.version }}
         run: |
           set -euo pipefail
