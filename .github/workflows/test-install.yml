@@ -6,8 +6,9 @@ on:
     workflows: ["Mirror Release"]
     types: [completed]
 
-  # Test PRs that touch the installer or its tests
+  # Test PRs that touch the installer or its tests. A draft runs nothing; marking it ready runs the tests.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths: [install.sh, test/**, .github/workflows/test-install.yml]
 
   # Manual trigger with optional version override
@@ -28,8 +29,9 @@ jobs:
   # ---------------------------------------------------------------------------
   test-linux:
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success') &&
+      github.event.pull_request.draft != true
     strategy:
       fail-fast: false
       matrix:
@@ -90,8 +92,9 @@ jobs:
   # ---------------------------------------------------------------------------
   test-macos:
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success') &&
+      github.event.pull_request.draft != true
     strategy:
       fail-fast: false
       matrix:
@@ -128,8 +131,9 @@ jobs:
   # ---------------------------------------------------------------------------
   test-refusal:
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success') &&
+      github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     name: refusal / linux
     steps:
@@ -178,7 +182,7 @@ jobs:
   # Summary — single required check for branch protection
   # ---------------------------------------------------------------------------
   results:
-    if: always()
+    if: always() && github.event.pull_request.draft != true
     needs: [test-linux, test-macos, test-refusal]
     runs-on: ubuntu-latest
     name: results
